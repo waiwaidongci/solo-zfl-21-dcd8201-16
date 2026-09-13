@@ -6,7 +6,7 @@
 
 ```bash
 PORT=3021 node server.js          # 默认数据目录 ./data，可用 DATA_DIR 覆盖
-npm test                          # node --test，41 个用例
+npm test                          # node --test，约定式发现，55 个用例
 ```
 
 首次启动若 `data/` 为空，会写入与原服务一致的演示钟表；旧版 `data/db.json`（v1 钟表/调校/复测）会在首次启动时**自动迁移**为审计事件。
@@ -38,6 +38,7 @@ awaiting_retest / returned_to_tuning ──复测合格(日差且摆幅)──�
 
 - 接口金额一律使用以**分**为单位的整数：`assessorLimitCents`、`unitPriceCents`、`totalAmountCents`（也接受元别名 `assessorLimit`/`unitPrice`/`totalAmount`，数字或最多两位小数字符串）。
 - 不变量：**分项报价合计必须精确等于总报价**，否则 `400 AMOUNT_MISMATCH`，不落任何数据。
+- 振幅必须为**正数**：建档 `minCompletionAmplitude` 与任何复测（调校复测、完工复测）的 `amplitude` 传 `0`/负数/非数字均返回 `400 INVALID_AMPLITUDE`，不会通过或结案。
 - 超过授权额度的报价自动路由 `pending_supervisor`，定损员审批返回 `403 FORBIDDEN`。
 
 ## 新增接口
@@ -61,6 +62,7 @@ awaiting_retest / returned_to_tuning ──复测合格(日差且摆幅)──�
 ## 幂等与并发
 
 - 写接口支持 `Idempotency-Key` 请求头：同键重放首次结果（含首次状态码），键跨重启仍生效；同键用于不同操作返回 `409 IDEMPOTENCY_KEY_CONFLICT`。
+- 幂等键**绑定具体作用域**：指纹 = 操作命令 + 目标资源（`caseId`/`clockId`）+ 规范化请求载荷 + 操作者。同一键只有在这些完全一致时才回放；换钟表/案件、改载荷（JSON 键序不同但内容相同除外）、换操作、换操作者，一律 `409 IDEMPOTENCY_KEY_CONFLICT`，绝不回放旧结果。
 - 所有写事务经单进程互斥链串行化：重复提交/审批/确认，以及并发审批、并发结算，只有一个胜出，其余 `409 INVALID_STATE`，不会出现重复记录或状态覆盖。
 
 ## 审计与持久化（重启不丢、不留半条数据）

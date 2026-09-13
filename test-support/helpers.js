@@ -27,6 +27,7 @@ async function startServer(options = {}) {
 
   await boot(options.seed !== false);
   const base = () => `http://127.0.0.1:${handle.servers[handle.servers.length - 1].address().port}`;
+  handle.base = base();
 
   handle.call = async function call(method, urlPath, body, headers = {}) {
     const init = { method, headers: { ...headers } };

@@ -273,26 +273,39 @@ function applyEvent(state, event) {
 
 /* ---------------- 命令处理：参数校验/授权/状态前置条件 -> 事件 ---------------- */
 
+/** 校验复测摆幅：必须是正数（度），0 或负数一律拒绝。 */
+function positiveAmplitude(value) {
+  const amplitude = Number(value);
+  if (!Number.isFinite(amplitude) || amplitude <= 0) {
+    fail(400, "INVALID_AMPLITUDE", `振幅 amplitude 必须为正数（收到 ${value}）`);
+  }
+  return amplitude;
+}
+
 function registerClock(state, cmd, ctx, deps) {
   optionalActor(ctx);
   const code = requiredString(cmd, "code");
   const escapementType = requiredString(cmd, "escapementType");
   const balanceFrequency = requiredString(cmd, "balanceFrequency");
+  const targetDailyRateSeconds = Number.isFinite(Number(cmd.targetDailyRateSeconds))
+    ? Number(cmd.targetDailyRateSeconds)
+    : 30;
+  // 完工复测摆幅下限：可覆盖但必须是正数；不传用默认值。
+  const hasMinAmplitude = cmd.minCompletionAmplitude !== undefined;
+  const minCompletionAmplitude = hasMinAmplitude
+    ? positiveAmplitude(cmd.minCompletionAmplitude)
+    : DEFAULT_MIN_COMPLETION_AMPLITUDE;
+  if (targetDailyRateSeconds < 0) fail(400, "VALIDATION_ERROR", "日差目标不能为负");
   const clock = {
     id: deps.id("clock"),
     code,
     escapementType,
     balanceFrequency,
-    targetDailyRateSeconds: Number.isFinite(Number(cmd.targetDailyRateSeconds))
-      ? Number(cmd.targetDailyRateSeconds)
-      : 30,
-    minCompletionAmplitude: Number.isFinite(Number(cmd.minCompletionAmplitude))
-      ? Number(cmd.minCompletionAmplitude)
-      : DEFAULT_MIN_COMPLETION_AMPLITUDE,
+    targetDailyRateSeconds,
+    minCompletionAmplitude,
     note: typeof cmd.note === "string" ? cmd.note : "",
     createdAt: deps.now()
   };
-  if (clock.targetDailyRateSeconds < 0) fail(400, "VALIDATION_ERROR", "日差目标不能为负");
   return [{ type: "ClockRegistered", data: clock }, clock];
 }
 
@@ -334,7 +347,7 @@ function recordRetest(state, cmd, ctx, deps) {
     adjustmentId: cmd.adjustmentId || adjustment?.id || null,
     testedAt: cmd.testedAt || deps.now(),
     dailyRateSeconds: Number(cmd.dailyRateSeconds),
-    amplitude: Number(cmd.amplitude),
+    amplitude: positiveAmplitude(cmd.amplitude),
     qualified,
     passed: null,
     note: typeof cmd.note === "string" ? cmd.note : ""
@@ -484,9 +497,10 @@ function completionRetest(state, cmd, ctx, deps) {
     fail(400, "VALIDATION_ERROR", "缺少字段：dailyRateSeconds, amplitude");
   }
   const dailyRateSeconds = Number(cmd.dailyRateSeconds);
-  const amplitude = Number(cmd.amplitude);
-  if (!Number.isFinite(dailyRateSeconds) || !Number.isFinite(amplitude)) {
-    fail(400, "VALIDATION_ERROR", "日差和摆幅必须是数字");
+  // 摆幅必须为正数：0/负数属于非法测量，直接 400，绝不进入合格判定或结案。
+  const amplitude = positiveAmplitude(cmd.amplitude);
+  if (!Number.isFinite(dailyRateSeconds)) {
+    fail(400, "VALIDATION_ERROR", "日差必须是数字");
   }
 
   // 双闸门：日差 AND 摆幅同时满足才合格，任一不满足退回调校。

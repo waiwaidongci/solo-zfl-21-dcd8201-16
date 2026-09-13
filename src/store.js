@@ -24,12 +24,43 @@ const {
 const { constants: FS_CONSTANTS, createReadStream } = require("fs");
 const path = require("path");
 const readline = require("readline");
+const crypto = require("crypto");
 
 const domain = require("./domain");
 const { applyEvent, initialState, COMMANDS, DomainError } = domain;
 
 const SNAPSHOT_NAME = "db.json";
 const AUDIT_NAME = "audit.log";
+
+/**
+ * 幂等键的作用域指纹：把“具体操作 + 目标资源 + 请求载荷 + 操作者”规范化后哈希。
+ * 同一个 Idempotency-Key 只有在指纹完全一致时才回放首次结果；
+ * 换命令、换钟表/案件、换载荷（含键序不同但内容相同除外）、换操作者都视为冲突，409。
+ */
+function canonicalize(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value ?? null);
+  if (Array.isArray(value)) return `[${value.map(canonicalize).join(",")}]`;
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalize(value[key])}`).join(",")}}`;
+}
+
+/** 每条命令的“目标资源”：优先显式 id，其次载荷中的 caseId/clockId。 */
+function resourceOf(commandName, cmd) {
+  if (cmd && typeof cmd === "object") {
+    if (cmd.caseId) return `case:${cmd.caseId}`;
+    if (cmd.clockId) return `clock:${cmd.clockId}`;
+  }
+  return `${commandName}:_`;
+}
+
+function fingerprintOf(commandName, cmd, actor) {
+  const payload = canonicalize(cmd || {});
+  const who = actor ? `${actor.role || "?"}:${actor.userId || "?"}` : "anon";
+  return crypto
+    .createHash("sha256")
+    .update([commandName, resourceOf(commandName, cmd), who, payload].join("|"))
+    .digest("hex");
+}
 
 function defaultMakeId(prefix) {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -232,6 +263,7 @@ class Store {
   registerIdempotency(envelope) {
     this.idempotency.set(envelope.idempotencyKey, {
       command: envelope.command,
+      fingerprint: envelope.idempotencyFingerprint || null,
       status: envelope.result?.status || 201,
       result: envelope.result?.body ?? null
     });
@@ -258,11 +290,13 @@ class Store {
 
   async runTransaction(commandName, cmd, actor, options) {
     const idemKey = options.idempotencyKey || null;
+    const fingerprint = idemKey ? fingerprintOf(commandName, cmd, actor) : null;
     if (idemKey) {
       const cached = this.idempotency.get(idemKey);
       if (cached) {
-        if (cached.command !== commandName) {
-          throw new DomainError(409, "IDEMPOTENCY_KEY_CONFLICT", "同一幂等键被用于不同操作");
+        // 键相同但作用域不同（操作/资源/载荷/操作者）时拒绝回放，绝不返回旧结果。
+        if (cached.command !== commandName || cached.fingerprint !== fingerprint) {
+          throw new DomainError(409, "IDEMPOTENCY_KEY_CONFLICT", "同一幂等键已绑定其他操作、资源或请求载荷");
         }
         return { replayed: true, status: cached.status, result: cached.result };
       }
@@ -280,8 +314,9 @@ class Store {
       actor: actor ? { userId: actor.userId, role: actor.role } : null,
       type: event.type,
       data: event.data,
-      // 幂等键与返回值挂在该命令的第一条事件上，随日志持久化，重启仍可重放。
+      // 幂等键与作用域指纹、返回值挂在该命令的第一条事件上，随日志持久化，重启仍可重放。
       idempotencyKey: index === 0 ? idemKey : null,
+      idempotencyFingerprint: index === 0 ? fingerprint : null,
       result: index === 0 ? { status: 201, body: resultValue } : null,
       command: index === 0 ? commandName : null
     }));
