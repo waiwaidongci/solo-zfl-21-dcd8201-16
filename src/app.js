@@ -130,7 +130,12 @@ function createApp(store) {
     }
 
     if (req.method === "POST" && pathname === "/clocks") {
-      return exec("registerClock", await parseBody(req), req, res);
+      // 兼容旧接口：返回钟表摘要（含 qualified/latestAdjustment/latestRetest）。
+      const outcome = await store.command("registerClock", await parseBody(req), actorFrom(req), {
+        idempotencyKey: req.headers["idempotency-key"] ? String(req.headers["idempotency-key"]) : null
+      });
+      const clock = state().clocks.find((item) => item.id === outcome.result.id);
+      return send(res, outcome.status, { data: clockSummary(state(), clock), replayed: Boolean(outcome.replayed) });
     }
 
     if (req.method === "GET" && pathname === "/clocks/not-qualified") {
@@ -160,8 +165,14 @@ function createApp(store) {
 
     match = pathname.match(/^\/clocks\/([^/]+)\/retests$/);
     if (match && req.method === "POST") {
+      // 兼容旧接口：除复测数据外，附带该钟表的最新摘要。
       const body = await parseBody(req);
-      return exec("recordRetest", { ...body, clockId: match[1] }, req, res);
+      const outcome = await store.command("recordRetest", { ...body, clockId: match[1] }, actorFrom(req), {
+        idempotencyKey: req.headers["idempotency-key"] ? String(req.headers["idempotency-key"]) : null
+      });
+      const retest = state().retests.find((item) => item.id === outcome.result.id) || outcome.result;
+      const clock = state().clocks.find((item) => item.id === retest.clockId);
+      return send(res, outcome.status, { data: retest, clock: clockSummary(state(), clock), replayed: Boolean(outcome.replayed) });
     }
 
     match = pathname.match(/^\/clocks\/([^/]+)\/latest-retest$/);
